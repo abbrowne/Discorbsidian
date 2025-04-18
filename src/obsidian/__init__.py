@@ -1,0 +1,1 @@
+# This file makes the obsidian directory a Python package 
