@@ -4,9 +4,19 @@ from typing import Optional, List
 from dotenv import load_dotenv
 
 class ObsidianVault:
-    def __init__(self):
+    def __init__(self, vault_path: Optional[str] = None):
+        """
+        Initialize the Obsidian vault
+        
+        Args:
+            vault_path: Optional path to the Obsidian vault. If not provided, will use OBSIDIAN_VAULT_PATH from environment.
+        """
         load_dotenv()
-        self.vault_path = Path(os.getenv('OBSIDIAN_VAULT_PATH'))
+        if vault_path:
+            self.vault_path = Path(vault_path)
+        else:
+            self.vault_path = Path(os.getenv('OBSIDIAN_VAULT_PATH'))
+            
         if not self.vault_path.exists():
             raise ValueError(f"Obsidian vault path does not exist: {self.vault_path}")
 
