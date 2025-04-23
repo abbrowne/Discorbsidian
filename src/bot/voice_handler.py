@@ -4,6 +4,7 @@ import logging
 import datetime
 import tempfile
 import uuid
+import json
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple, Any
 
@@ -66,7 +67,13 @@ if VOICE_RECV_AVAILABLE:
                 has_opus = hasattr(data, 'opus') and data.opus is not None
                 opus_size = len(data.opus) if has_opus else 0
                 
-                logger.debug(f"Received packet from {user_name} (ID: {user_id}): " 
+                # Lower log level for ignored bots to reduce noise
+                if self.voice_handler.is_ignored_bot(user):
+                    log_level = logging.DEBUG
+                else:
+                    log_level = logging.DEBUG
+                
+                logger.log(log_level, f"Received packet from {user_name} (ID: {user_id}): " 
                           f"PCM: {has_pcm} ({pcm_size} bytes), "
                           f"Opus: {has_opus} ({opus_size} bytes)")
                 
@@ -75,12 +82,17 @@ if VOICE_RECV_AVAILABLE:
                     for uid, count in self.packet_counters.items():
                         u = self.voice_handler.bot.get_user(uid)
                         name = u.name if u else f"User {uid}"
-                        logger.info(f"User {name} has sent {count} audio packets so far")
+                        # Only log non-ignored bots or users at INFO level
+                        if u and not self.voice_handler.is_ignored_bot(u):
+                            logger.info(f"User {name} has sent {count} audio packets so far")
                     self.last_log_time = now
             else:
                 logger.warning("Received audio packet with no user information")
-                
-            if not user or user.bot:
+            
+            # Skip processing for empty users, bots, or users in the ignore list
+            if not user or self.voice_handler.is_ignored_bot(user):
+                if user and user.name in self.voice_handler.ignored_bot_names:
+                    logger.debug(f"Ignoring audio from bot in ignored list: {user.name}")
                 return
                 
             # Check data validity
@@ -309,6 +321,17 @@ class VoiceHandler:
         self.connection_lock = asyncio.Lock()
         self.temp_dir = Path(tempfile.gettempdir()) / "discorbsidian_audio"
         self.audio_dir = Path("audio_recordings")
+        
+        # Config file for persisting settings
+        self.config_file = Path("config/voice_handler_config.json")
+        
+        # Load or initialize the ignored bots list
+        self.ignored_bot_names = self._load_ignored_bots()
+        if not self.ignored_bot_names:
+            self.ignored_bot_names = {"Lofi Radio"}
+            self._save_ignored_bots()
+            
+        logger.info(f"Ignoring bots: {', '.join(self.ignored_bot_names)}")
         self.setup_audio_directory()
         
     def setup_audio_directory(self):
@@ -844,4 +867,141 @@ class VoiceHandler:
                 for audio_file in audio_files:
                     await self.transcribe_audio_file(channel_id, username, audio_file)
                     
-            return user_audio_files 
+            return user_audio_files
+
+    def _load_ignored_bots(self) -> Set[str]:
+        """
+        Load the ignored bots list from config file
+        
+        Returns:
+            Set of bot names to ignore
+        """
+        try:
+            # Ensure the config directory exists
+            self.config_file.parent.mkdir(parents=True, exist_ok=True)
+            
+            if self.config_file.exists():
+                with open(self.config_file, 'r') as f:
+                    config = json.load(f)
+                    return set(config.get('ignored_bots', []))
+        except Exception as e:
+            logger.error(f"Error loading ignored bots list: {e}", exc_info=True)
+        
+        return set()
+    
+    def _save_ignored_bots(self) -> bool:
+        """
+        Save the ignored bots list to config file
+        
+        Returns:
+            True if saved successfully, False otherwise
+        """
+        try:
+            # Ensure the config directory exists
+            self.config_file.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Create config with the current ignored bots list
+            config = {
+                'ignored_bots': list(self.ignored_bot_names),
+                'last_updated': datetime.datetime.now().isoformat()
+            }
+            
+            # Write to file
+            with open(self.config_file, 'w') as f:
+                json.dump(config, f, indent=2)
+                
+            logger.debug(f"Saved ignored bots list to {self.config_file}")
+            return True
+        except Exception as e:
+            logger.error(f"Error saving ignored bots list: {e}", exc_info=True)
+            return False
+
+    # Add methods to manage ignored bots
+    def add_ignored_bot(self, bot_name: str) -> bool:
+        """
+        Add a bot name to the ignore list
+        
+        Args:
+            bot_name: Name of the bot to ignore
+            
+        Returns:
+            True if the bot was added, False if it was already in the list
+        """
+        if bot_name in self.ignored_bot_names:
+            return False
+        self.ignored_bot_names.add(bot_name)
+        logger.info(f"Added '{bot_name}' to ignored bots list")
+        self._save_ignored_bots()
+        return True
+        
+    def remove_ignored_bot(self, bot_name: str) -> bool:
+        """
+        Remove a bot name from the ignore list
+        
+        Args:
+            bot_name: Name of the bot to stop ignoring
+            
+        Returns:
+            True if the bot was removed, False if it wasn't in the list
+        """
+        if bot_name not in self.ignored_bot_names:
+            return False
+        self.ignored_bot_names.remove(bot_name)
+        logger.info(f"Removed '{bot_name}' from ignored bots list")
+        self._save_ignored_bots()
+        return True
+        
+    def get_ignored_bots(self) -> List[str]:
+        """
+        Get the list of bot names being ignored
+        
+        Returns:
+            List of ignored bot names
+        """
+        return list(self.ignored_bot_names)
+        
+    def is_ignored_bot(self, user) -> bool:
+        """
+        Check if a user should be ignored (either a bot or on the ignored list)
+        
+        Args:
+            user: Discord user object
+            
+        Returns:
+            True if the user should be ignored
+        """
+        if not user:
+            return True
+            
+        # Check if user is a bot or has a name in our ignored list
+        if getattr(user, 'bot', False) or user.name in self.ignored_bot_names:
+            return True
+            
+        return False
+
+async def process_and_enhance_transcript(transcript, metadata):
+    """Add Obsidian-friendly enhancements to transcripts"""
+    summary = await generate_summary(transcript)
+    topics = await extract_topics(transcript)
+    sentiment = await analyze_sentiment(transcript)
+    
+    enhanced_content = f"""---
+type: discord-voice
+channel: {metadata['channel']}
+speaker: {metadata['username']}
+date: {metadata['date']}
+duration: {metadata['duration_seconds']}
+topics: {topics}
+sentiment: {sentiment}
+summary: "{summary}"
+---
+
+# Voice Recording: {metadata['username']} in {metadata['channel']}
+
+## Summary
+{summary}
+
+## Transcript
+{transcript}
+"""
+    return enhanced_content 

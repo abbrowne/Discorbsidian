@@ -176,15 +176,45 @@ async def fetch_channel_history(channel, days=1):
     
     print(f"Finished fetching message history for channel {channel.name}.")
 
-async def fetch_all_channels_history(days=1):
-    """Fetch message history from all allowed channels for the specified number of days"""
+async def fetch_all_channels_history(days=100):
+    """Fetch message history from all allowed channels for the specified number of days
+    
+    Args:
+        days (int, optional): Number of days of history to fetch. Default is 100 days.
+    """
     print(f"\nFetching message history from all channels for the last {days} day(s)...")
+    
+    if days > 30:
+        print(f"Warning: Fetching {days} days of history may take a long time and use significant resources.")
+    
+    # Track statistics for reporting
+    total_messages = 0
+    processed_channels = 0
     
     # Fetch messages from each channel
     for channel_id in ALLOWED_CHANNEL_IDS:
         channel = bot.get_channel(channel_id)
         if channel:
-            await fetch_channel_history(channel, days)
+            channel_msg_count = 0
+            print(f"Starting to fetch messages from channel: {channel.name}")
+            # Calculate the time threshold
+            time_threshold = datetime.utcnow() - timedelta(days=days)
+            
+            # Fetch messages
+            async for message in channel.history(limit=None, after=time_threshold):
+                await process_message(message)
+                channel_msg_count += 1
+                total_messages += 1
+                
+                # Save batches of 1000 messages at a time to reduce memory usage
+                if total_messages % 1000 == 0:
+                    print(f"Processed {total_messages} messages so far...")
+                    # Save messages for each day
+                    for date_str in sorted(messages_by_date_and_channel.keys()):
+                        await save_messages_to_vault(date_str)
+            
+            processed_channels += 1
+            print(f"Finished fetching {channel_msg_count} messages from channel {channel.name}.")
         else:
             print(f"Warning: Could not find channel with ID {channel_id}")
     
@@ -192,7 +222,7 @@ async def fetch_all_channels_history(days=1):
     for date_str in sorted(messages_by_date_and_channel.keys()):
         await save_messages_to_vault(date_str)
     
-    print("Finished fetching and processing message history from all channels.")
+    print(f"Finished processing {total_messages} messages from {processed_channels} channels over {days} days.")
 
 @bot.event
 async def on_ready():
@@ -206,8 +236,9 @@ async def on_ready():
     print("Voice recorder initialized")
     print("To start recording, use !record or !monitor_voice in a text channel")
     
-    # Fetch message history when bot starts
-    await fetch_all_channels_history()
+    # Fetch message history when bot starts - get last 100 days instead of just 1
+    print("Fetching the last 100 days of message history...")
+    await fetch_all_channels_history(days=100)
 
 @bot.event
 async def on_message(message):
@@ -347,12 +378,23 @@ async def recording_status(ctx):
         await ctx.send("Voice recording is not supported.")
 
 @bot.command(name='history')
-async def fetch_history(ctx, days: int = 1):
-    """Command to fetch message history for a specific number of days"""
+async def fetch_history(ctx, days: int = 100):
+    """Fetch and save message history from all allowed channels
+    
+    This command fetches message history from all channels configured in DISCORD_CHANNEL_IDS
+    environment variable and saves them to the Obsidian vault in Daily Notes.
+    
+    Args:
+        days (int, optional): Number of days of history to fetch. Default is 100 days.
+            To fetch less history, specify a smaller number, e.g., !history 7
+    """
     if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
+        await ctx.send("This command can only be run from an allowed channel.")
         return
-        
+    
+    await ctx.send(f"Fetching message history for the last {days} days... This may take a while.")    
     await fetch_all_channels_history(days)
+    await ctx.send(f"Finished fetching and processing {days} days of message history.")
 
 @bot.command(name='monitor_voice')
 async def monitor_voice_command(ctx, channel_id=None, chunk_duration=300):
@@ -672,6 +714,62 @@ async def debug_voice_command(ctx, channel_id=None):
     except Exception as e:
         await ctx.send(f"Error getting debug info: {str(e)}")
         logging.error(f"Error in debug_voice command: {e}", exc_info=True)
+
+@bot.command(name='ignore_bot')
+async def ignore_bot_command(ctx, bot_name: str):
+    """Add a bot to the ignore list for voice recording.
+    
+    This command adds a bot name to the ignore list so its audio won't be recorded
+    even if it doesn't have the bot flag set.
+    
+    Args:
+        bot_name (str): The name of the bot to ignore.
+    """
+    try:
+        success = voice_handler.add_ignored_bot(bot_name)
+        if success:
+            await ctx.send(f"Added '{bot_name}' to the voice recording ignore list.")
+        else:
+            await ctx.send(f"'{bot_name}' is already on the ignore list.")
+    except Exception as e:
+        await ctx.send(f"Error adding bot to ignore list: {str(e)}")
+        logging.error(f"Error in ignore_bot command: {e}", exc_info=True)
+
+@bot.command(name='unignore_bot')
+async def unignore_bot_command(ctx, bot_name: str):
+    """Remove a bot from the ignore list for voice recording.
+    
+    This command removes a bot name from the ignore list so its audio will be recorded.
+    
+    Args:
+        bot_name (str): The name of the bot to stop ignoring.
+    """
+    try:
+        success = voice_handler.remove_ignored_bot(bot_name)
+        if success:
+            await ctx.send(f"Removed '{bot_name}' from the voice recording ignore list.")
+        else:
+            await ctx.send(f"'{bot_name}' is not on the ignore list.")
+    except Exception as e:
+        await ctx.send(f"Error removing bot from ignore list: {str(e)}")
+        logging.error(f"Error in unignore_bot command: {e}", exc_info=True)
+
+@bot.command(name='list_ignored_bots')
+async def list_ignored_bots_command(ctx):
+    """List all bots on the ignore list for voice recording.
+    
+    This command shows all bot names that are currently being ignored during voice recording.
+    """
+    try:
+        ignored_bots = voice_handler.get_ignored_bots()
+        if ignored_bots:
+            bot_list = "\n".join([f"- {name}" for name in ignored_bots])
+            await ctx.send(f"Currently ignoring the following bots during voice recording:\n{bot_list}")
+        else:
+            await ctx.send("No bots are currently on the ignore list.")
+    except Exception as e:
+        await ctx.send(f"Error getting ignored bots list: {str(e)}")
+        logging.error(f"Error in list_ignored_bots command: {e}", exc_info=True)
 
 def main():
     # Get the token from environment variables
